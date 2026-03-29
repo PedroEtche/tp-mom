@@ -9,22 +9,6 @@ import (
 )
 
 // -----------------------------------------------------------------------------
-// HELP FUNCTIONS
-// -----------------------------------------------------------------------------
-
-func readMessages(msgs <-chan amqp.Delivery, callbackFunc func(msg m.Message, ack func(), nack func()), stopChannel <-chan bool) {
-	for {
-		select {
-		// TODO: Ver que pasa si se cae Rabbit cuando intento leer un mensaje
-		case d := <-msgs:
-			callbackFunc(m.Message{Body: string(d.Body)}, func() { d.Ack(false) }, func() { d.Nack(false, false) })
-		case _ = <-stopChannel:
-			return
-		}
-	}
-}
-
-// -----------------------------------------------------------------------------
 // MIDDLEWARE INTERFACE IMPLEMENTATION
 // -----------------------------------------------------------------------------
 
@@ -33,8 +17,6 @@ type QueueMiddleware struct {
 	name        string
 	channel     *amqp.Channel
 	declaration amqp.Queue
-	stopChannel chan bool
-	consuming   bool
 }
 
 func NewQueue(name string, connectionSettings m.ConnSettings) (*QueueMiddleware, error) {
@@ -62,18 +44,13 @@ func NewQueue(name string, connectionSettings m.ConnSettings) (*QueueMiddleware,
 		return nil, err
 	}
 
-	stopChannel := make(chan bool)
-
-	return &QueueMiddleware{connection: conn, name: name, channel: ch, declaration: q, stopChannel: stopChannel, consuming: false}, nil
+	return &QueueMiddleware{connection: conn, name: name, channel: ch, declaration: q}, nil
 }
 
 func (qm *QueueMiddleware) StartConsuming(callbackFunc func(msg m.Message, ack func(), nack func())) (err error) {
-	if qm.consuming {
-		return nil
-	}
 	msgs, err := qm.channel.Consume(
 		qm.name, // queue
-		"",      // consumer
+		qm.name, // consumer
 		false,   // auto-ack
 		false,   // exclusive
 		false,   // no-local
@@ -87,18 +64,18 @@ func (qm *QueueMiddleware) StartConsuming(callbackFunc func(msg m.Message, ack f
 		return m.ErrMessageMiddlewareMessage
 	}
 
-	go readMessages(msgs, callbackFunc, qm.stopChannel)
+	for d := range msgs {
+		copy := d
+		callbackFunc(m.Message{Body: string(copy.Body)}, func() { copy.Ack(false) }, func() { copy.Nack(false, false) })
+	}
 
-	qm.consuming = true
 	return nil
 }
 
 func (qm *QueueMiddleware) StopConsuming() {
-	if !qm.consuming {
-		return
+	if err := qm.channel.Cancel(qm.name, false); err != nil {
+		fmt.Printf("Error stopping consuming: %v\n", err)
 	}
-	qm.stopChannel <- true
-	qm.consuming = false
 }
 
 func (qm *QueueMiddleware) Send(msg m.Message) (err error) {
