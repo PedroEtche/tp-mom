@@ -13,10 +13,9 @@ import (
 // -----------------------------------------------------------------------------
 
 type QueueMiddleware struct {
-	connection  *amqp.Connection
-	name        string
-	channel     *amqp.Channel
-	declaration amqp.Queue
+	connection *amqp.Connection
+	channel    *amqp.Channel
+	queue      amqp.Queue
 }
 
 func NewQueue(name string, connectionSettings m.ConnSettings) (*QueueMiddleware, error) {
@@ -25,6 +24,7 @@ func NewQueue(name string, connectionSettings m.ConnSettings) (*QueueMiddleware,
 		return nil, err
 	}
 
+	// NOTE: Creo un nuevo channel para cada nuevo QueueMiddleware. Segun los docs de RabbitMQ (https://www.rabbitmq.com/docs/channels), internament van a utilizar la misma conexion TCP para evitar overhead
 	ch, err := conn.Channel()
 	if err != nil {
 		return nil, err
@@ -44,18 +44,20 @@ func NewQueue(name string, connectionSettings m.ConnSettings) (*QueueMiddleware,
 		return nil, err
 	}
 
-	return &QueueMiddleware{connection: conn, name: name, channel: ch, declaration: q}, nil
+	return &QueueMiddleware{connection: conn, channel: ch, queue: q}, nil
 }
 
 func (qm *QueueMiddleware) StartConsuming(callbackFunc func(msg m.Message, ack func(), nack func())) (err error) {
+	// NOTE: Por lo que entendi de los docs (https://www.rabbitmq.com/docs/channels), como creo un nuevo channel para cada QueueMiddleware
+	// No se va a generar el error de que dos consumidores tengan el mismo nombre, que en este caso seria el nombre de la queue, ya que los consumidores viven en canales distintos
 	msgs, err := qm.channel.Consume(
-		qm.name, // queue
-		qm.name, // consumer
-		false,   // auto-ack
-		false,   // exclusive
-		false,   // no-local
-		false,   // no-wait
-		nil,     // args
+		qm.queue.Name, // queue
+		qm.queue.Name, // consumer
+		false,         // auto-ack
+		false,         // exclusive
+		false,         // no-local
+		false,         // no-wait
+		nil,           // args
 	)
 	if err != nil {
 		if errors.Is(err, amqp.ErrClosed) {
@@ -73,17 +75,17 @@ func (qm *QueueMiddleware) StartConsuming(callbackFunc func(msg m.Message, ack f
 }
 
 func (qm *QueueMiddleware) StopConsuming() {
-	if err := qm.channel.Cancel(qm.name, false); err != nil {
+	if err := qm.channel.Cancel(qm.queue.Name, false); err != nil {
 		fmt.Printf("Error stopping consuming: %v\n", err)
 	}
 }
 
 func (qm *QueueMiddleware) Send(msg m.Message) (err error) {
 	err = qm.channel.Publish(
-		"",      // exchange
-		qm.name, // routing key
-		false,   // mandatory
-		false,   // immediate
+		"",            // exchange
+		qm.queue.Name, // routing key
+		false,         // mandatory
+		false,         // immediate
 		amqp.Publishing{
 			ContentType: "text/plain",
 			Body:        []byte(msg.Body),

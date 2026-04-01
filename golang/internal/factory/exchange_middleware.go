@@ -14,6 +14,7 @@ import (
 type ExchangeMiddleware struct {
 	connection *amqp.Connection
 	name       string
+	channel    *amqp.Channel
 }
 
 func NewExchange(name string, connectionSettings m.ConnSettings) (*ExchangeMiddleware, error) {
@@ -22,12 +23,22 @@ func NewExchange(name string, connectionSettings m.ConnSettings) (*ExchangeMiddl
 		return nil, err
 	}
 
-	_, err = conn.Channel()
+	ch, err := conn.Channel()
 	if err != nil {
 		return nil, err
 	}
 
-	return &ExchangeMiddleware{}, nil
+	err = ch.ExchangeDeclare(
+		name,    // name
+		"topic", // type
+		false,   // durability
+		false,   // auto-deleted
+		false,   // internal
+		false,   // no-wait
+		nil,     // arguments
+	)
+
+	return &ExchangeMiddleware{connection: conn, name: name, channel: ch}, nil
 }
 
 func (em *ExchangeMiddleware) StartConsuming(callbackFunc func(msg m.Message, ack func(), nack func())) (err error) {
@@ -42,5 +53,12 @@ func (em *ExchangeMiddleware) Send(msg m.Message) (err error) {
 }
 
 func (em *ExchangeMiddleware) Close() error {
+	if err := em.channel.Close(); err != nil {
+		return m.ErrMessageMiddlewareClose
+	}
+
+	if err := em.connection.Close(); err != nil {
+		return m.ErrMessageMiddlewareClose
+	}
 	return nil
 }
