@@ -8,10 +8,6 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
-// -----------------------------------------------------------------------------
-// MIDDLEWARE INTERFACE IMPLEMENTATION
-// -----------------------------------------------------------------------------
-
 type ExchangeMiddleware struct {
 	connection *amqp.Connection
 	name       string
@@ -22,12 +18,19 @@ type ExchangeMiddleware struct {
 func NewExchange(name string, keys []string, connectionSettings m.ConnSettings) (*ExchangeMiddleware, error) {
 	conn, err := amqp.Dial(fmt.Sprintf("amqp://guest:guest@%s:%v/", connectionSettings.Hostname, connectionSettings.Port))
 	if err != nil {
-		return nil, err
+		if errors.Is(err, amqp.ErrClosed) {
+			return nil, m.ErrMessageMiddlewareDisconnected
+		}
+		return nil, m.ErrMessageMiddlewareMessage
 	}
 
 	ch, err := conn.Channel()
 	if err != nil {
-		return nil, err
+		if errors.Is(err, amqp.ErrClosed) {
+			return nil, m.ErrMessageMiddlewareDisconnected
+		}
+		conn.Close()
+		return nil, m.ErrMessageMiddlewareMessage
 	}
 
 	err = ch.ExchangeDeclare(
@@ -39,6 +42,14 @@ func NewExchange(name string, keys []string, connectionSettings m.ConnSettings) 
 		false,    // no-wait
 		nil,      // arguments
 	)
+	if err != nil {
+		if errors.Is(err, amqp.ErrClosed) {
+			return nil, m.ErrMessageMiddlewareDisconnected
+		}
+		// NOTE: Si no se pudo declarar el exchange, cierro la conexion
+		conn.Close()
+		return nil, m.ErrMessageMiddlewareMessage
+	}
 
 	return &ExchangeMiddleware{connection: conn, name: name, keys: keys, channel: ch}, nil
 }
@@ -82,9 +93,9 @@ func (em *ExchangeMiddleware) channelConsumeSetUp(q amqp.Queue) (<-chan amqp.Del
 	return msgs, nil
 }
 
-func (em *ExchangeMiddleware) bindQueueToKeys(err error, q amqp.Queue) error {
+func (em *ExchangeMiddleware) bindQueueToKeys(q amqp.Queue) error {
 	for _, key := range em.keys {
-		err = em.channel.QueueBind(
+		err := em.channel.QueueBind(
 			q.Name,  // queue name
 			key,     // routing key
 			em.name, // exchange
@@ -100,13 +111,17 @@ func (em *ExchangeMiddleware) bindQueueToKeys(err error, q amqp.Queue) error {
 	return nil
 }
 
+// -----------------------------------------------------------------------------
+// MIDDLEWARE INTERFACE IMPLEMENTATION
+// -----------------------------------------------------------------------------
+
 func (em *ExchangeMiddleware) StartConsuming(callbackFunc func(msg m.Message, ack func(), nack func())) (err error) {
 	q, err := em.queueDeclareSetUp()
 	if err != nil {
 		return err
 	}
 
-	if err = em.bindQueueToKeys(err, q); err != nil {
+	if err = em.bindQueueToKeys(q); err != nil {
 		return err
 	}
 
@@ -126,7 +141,7 @@ func (em *ExchangeMiddleware) StartConsuming(callbackFunc func(msg m.Message, ac
 func (em *ExchangeMiddleware) StopConsuming() {
 	// NOTE: En este caso em.name hace alusion al nombre del consumer
 	if err := em.channel.Cancel(em.name, false); err != nil {
-		fmt.Printf("Error stopping consuming: %v\n", err)
+		fmt.Printf("Error stopping consuming: %v\n", m.ErrMessageMiddlewareDisconnected)
 	}
 }
 
