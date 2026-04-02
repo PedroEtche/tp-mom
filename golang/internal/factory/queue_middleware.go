@@ -48,8 +48,22 @@ func NewQueue(name string, connectionSettings m.ConnSettings) (*QueueMiddleware,
 }
 
 func (qm *QueueMiddleware) StartConsuming(callbackFunc func(msg m.Message, ack func(), nack func())) (err error) {
-	// NOTE: Por lo que entendi de los docs (https://www.rabbitmq.com/docs/channels), como creo un nuevo channel para cada QueueMiddleware
-	// No se va a generar el error de que dos consumidores tengan el mismo nombre, que en este caso seria el nombre de la queue, ya que los consumidores viven en canales distintos
+	msgs, err := qm.channelConsumeSetUp()
+	if err != nil {
+		return err
+	}
+
+	for d := range msgs {
+		copy := d
+		callbackFunc(m.Message{Body: string(copy.Body)}, func() { copy.Ack(false) }, func() { copy.Nack(false, false) })
+	}
+
+	return nil
+}
+
+func (qm *QueueMiddleware) channelConsumeSetUp() (<-chan amqp.Delivery, error) {
+	// NOTE: Que el tag del consumer sea el mismo que el de la queue no deberia traer problema porque cada QueueMiddleware
+	// crea un nuevo channel (https://www.rabbitmq.com/docs/channels)
 	msgs, err := qm.channel.Consume(
 		qm.queue.Name, // queue
 		qm.queue.Name, // consumer
@@ -61,17 +75,11 @@ func (qm *QueueMiddleware) StartConsuming(callbackFunc func(msg m.Message, ack f
 	)
 	if err != nil {
 		if errors.Is(err, amqp.ErrClosed) {
-			return m.ErrMessageMiddlewareDisconnected
+			return nil, m.ErrMessageMiddlewareDisconnected
 		}
-		return m.ErrMessageMiddlewareMessage
+		return nil, m.ErrMessageMiddlewareMessage
 	}
-
-	for d := range msgs {
-		copy := d
-		callbackFunc(m.Message{Body: string(copy.Body)}, func() { copy.Ack(false) }, func() { copy.Nack(false, false) })
-	}
-
-	return nil
+	return msgs, nil
 }
 
 func (qm *QueueMiddleware) StopConsuming() {

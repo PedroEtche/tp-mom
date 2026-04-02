@@ -43,7 +43,7 @@ func NewExchange(name string, keys []string, connectionSettings m.ConnSettings) 
 	return &ExchangeMiddleware{connection: conn, name: name, keys: keys, channel: ch}, nil
 }
 
-func (em *ExchangeMiddleware) StartConsuming(callbackFunc func(msg m.Message, ack func(), nack func())) (err error) {
+func (em *ExchangeMiddleware) queueDeclareSetUp() (amqp.Queue, error) {
 	q, err := em.channel.QueueDeclare(
 		"",    // name
 		false, // durability
@@ -54,11 +54,35 @@ func (em *ExchangeMiddleware) StartConsuming(callbackFunc func(msg m.Message, ac
 	)
 	if err != nil {
 		if errors.Is(err, amqp.ErrClosed) {
-			return m.ErrMessageMiddlewareDisconnected
+			return amqp.Queue{}, m.ErrMessageMiddlewareDisconnected
 		}
-		return m.ErrMessageMiddlewareMessage
+		return amqp.Queue{}, m.ErrMessageMiddlewareMessage
 	}
+	return q, nil
+}
 
+func (em *ExchangeMiddleware) channelConsumeSetUp(q amqp.Queue) (<-chan amqp.Delivery, error) {
+	// NOTE: El tag del consumer coincide con el nombre del exchange. No deberia surgir problema con esto ya que se abre un
+	// channel nuevo para cada ExchangeMiddleware
+	msgs, err := em.channel.Consume(
+		q.Name,  // queue
+		em.name, // consumer
+		false,   // auto ack
+		false,   // exclusive
+		false,   // no local
+		false,   // no wait
+		nil,     // args
+	)
+	if err != nil {
+		if errors.Is(err, amqp.ErrClosed) {
+			return nil, m.ErrMessageMiddlewareDisconnected
+		}
+		return nil, m.ErrMessageMiddlewareMessage
+	}
+	return msgs, nil
+}
+
+func (em *ExchangeMiddleware) bindQueueToKeys(err error, q amqp.Queue) error {
 	for _, key := range em.keys {
 		err = em.channel.QueueBind(
 			q.Name,  // queue name
@@ -73,21 +97,22 @@ func (em *ExchangeMiddleware) StartConsuming(callbackFunc func(msg m.Message, ac
 			return m.ErrMessageMiddlewareMessage
 		}
 	}
+	return nil
+}
 
-	msgs, err := em.channel.Consume(
-		q.Name,  // queue
-		em.name, // consumer
-		false,   // auto ack
-		false,   // exclusive
-		false,   // no local
-		false,   // no wait
-		nil,     // args
-	)
+func (em *ExchangeMiddleware) StartConsuming(callbackFunc func(msg m.Message, ack func(), nack func())) (err error) {
+	q, err := em.queueDeclareSetUp()
 	if err != nil {
-		if errors.Is(err, amqp.ErrClosed) {
-			return m.ErrMessageMiddlewareDisconnected
-		}
-		return m.ErrMessageMiddlewareMessage
+		return err
+	}
+
+	if err = em.bindQueueToKeys(err, q); err != nil {
+		return err
+	}
+
+	msgs, err := em.channelConsumeSetUp(q)
+	if err != nil {
+		return err
 	}
 
 	for d := range msgs {
@@ -99,6 +124,7 @@ func (em *ExchangeMiddleware) StartConsuming(callbackFunc func(msg m.Message, ac
 }
 
 func (em *ExchangeMiddleware) StopConsuming() {
+	// NOTE: En este caso em.name hace alusion al nombre del consumer
 	if err := em.channel.Cancel(em.name, false); err != nil {
 		fmt.Printf("Error stopping consuming: %v\n", err)
 	}
