@@ -75,6 +75,7 @@ func (qm *QueueMiddleware) StartConsuming(callbackFunc func(msg m.Message, ack f
 }
 
 func (qm *QueueMiddleware) StopConsuming() {
+	// NOTE: En este caso qm.queue.Name hace alusion al nombre del consumer
 	if err := qm.channel.Cancel(qm.queue.Name, false); err != nil {
 		fmt.Printf("Error stopping consuming: %v\n", err)
 	}

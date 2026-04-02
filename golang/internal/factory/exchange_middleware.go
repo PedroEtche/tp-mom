@@ -75,13 +75,13 @@ func (em *ExchangeMiddleware) StartConsuming(callbackFunc func(msg m.Message, ac
 	}
 
 	msgs, err := em.channel.Consume(
-		q.Name, // queue
-		"",     // consumer
-		false,  // auto ack
-		false,  // exclusive
-		false,  // no local
-		false,  // no wait
-		nil,    // args
+		q.Name,  // queue
+		em.name, // consumer
+		false,   // auto ack
+		false,   // exclusive
+		false,   // no local
+		false,   // no wait
+		nil,     // args
 	)
 	if err != nil {
 		if errors.Is(err, amqp.ErrClosed) {
