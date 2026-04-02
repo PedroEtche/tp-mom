@@ -138,11 +138,12 @@ func (em *ExchangeMiddleware) StartConsuming(callbackFunc func(msg m.Message, ac
 	return nil
 }
 
-func (em *ExchangeMiddleware) StopConsuming() {
+func (em *ExchangeMiddleware) StopConsuming() error {
 	// NOTE: En este caso em.name hace alusion al nombre del consumer
 	if err := em.channel.Cancel(em.name, false); err != nil {
-		fmt.Printf("Error stopping consuming: %v\n", m.ErrMessageMiddlewareDisconnected)
+		return m.ErrMessageMiddlewareDisconnected
 	}
+	return nil
 }
 
 func (em *ExchangeMiddleware) Send(msg m.Message) (err error) {

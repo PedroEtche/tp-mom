@@ -95,11 +95,12 @@ func (qm *QueueMiddleware) StartConsuming(callbackFunc func(msg m.Message, ack f
 	return nil
 }
 
-func (qm *QueueMiddleware) StopConsuming() {
+func (qm *QueueMiddleware) StopConsuming() error {
 	// NOTE: En este caso qm.queue.Name hace alusion al nombre del consumer
 	if err := qm.channel.Cancel(qm.queue.Name, false); err != nil {
-		fmt.Printf("Error stopping consuming: %v\n", m.ErrMessageMiddlewareDisconnected)
+		return m.ErrMessageMiddlewareDisconnected
 	}
+	return nil
 }
 
 func (qm *QueueMiddleware) Send(msg m.Message) (err error) {

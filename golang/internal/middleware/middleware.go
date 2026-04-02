@@ -32,7 +32,7 @@ type Middleware interface {
 	//Si se estaba consumiendo desde la cola/exchange, se detiene la escucha. Si
 	//no se estaba consumiendo de la cola/exchange, no tiene efecto, ni levanta
 	//Si se pierde la conexión con el middleware devuelve ErrMessageMiddlewareDisconnected.
-	StopConsuming()
+	StopConsuming() error
 
 	//Envía un mensaje a la cola o a los tópicos con el que se inicializó el exchange.
 	//Si se pierde la conexión con el middleware devuelve ErrMessageMiddlewareDisconnected.
