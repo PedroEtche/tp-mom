@@ -42,6 +42,8 @@ Instalar los dependencias de la suite de pruebas:
 
 # Documentacion
 
+Implemente la interfaz en Golang.
+
 Usando el modelo C4 se puede ver la siguiente estructura del codigo, yendo de mas a menos general
 
 
