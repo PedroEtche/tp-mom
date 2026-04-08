@@ -17,10 +17,8 @@ type QueueMiddleware struct {
 func NewQueue(name string, connectionSettings m.ConnSettings) (*QueueMiddleware, error) {
 	conn, err := amqp.Dial(fmt.Sprintf("amqp://guest:guest@%s:%v/", connectionSettings.Hostname, connectionSettings.Port))
 	if err != nil {
-		if errors.Is(err, amqp.ErrClosed) {
-			return nil, m.ErrMessageMiddlewareDisconnected
-		}
-		return nil, m.ErrMessageMiddlewareMessage
+		// NOTE: No enmascaro el error del Dial, para no poder precision sobre el mismo (e.g. URI mal formado)
+		return nil, err
 	}
 
 	// NOTE: Creo un nuevo channel para cada nuevo QueueMiddleware. Segun los docs de RabbitMQ (https://www.rabbitmq.com/docs/channels), internamente van a utilizar la misma conexion TCP para evitar overhead

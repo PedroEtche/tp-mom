@@ -18,10 +18,8 @@ type ExchangeMiddleware struct {
 func NewExchange(name string, keys []string, connectionSettings m.ConnSettings) (*ExchangeMiddleware, error) {
 	conn, err := amqp.Dial(fmt.Sprintf("amqp://guest:guest@%s:%v/", connectionSettings.Hostname, connectionSettings.Port))
 	if err != nil {
-		if errors.Is(err, amqp.ErrClosed) {
-			return nil, m.ErrMessageMiddlewareDisconnected
-		}
-		return nil, m.ErrMessageMiddlewareMessage
+		// NOTE: No enmascaro el error del Dial, para no poder precision sobre el mismo (e.g. URI mal formado)
+		return nil, err
 	}
 
 	ch, err := conn.Channel()
