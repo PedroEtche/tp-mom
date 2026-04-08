@@ -40,21 +40,7 @@ Instalar una versión de Golang superior a `1.24`.
 Instalar los dependencias de la suite de pruebas:
 `go mod download`
 
-# Documentacion
+# Nota
 
 Implemente la interfaz en Golang.
 
-Usando el modelo C4 se puede ver la siguiente estructura del codigo, yendo de mas a menos general
-
-
-## System Context 
-![alt text](docu/SystemContext-001.png)
-Un usuario (probablemente otro sistema de software) que quiere usar una interfaz acotada, pero sencilla, de RabbitMQ puede usar el sistema
-
-## Container
-![alt text](docu/Container-001.png)
-Dado que el scope es pequeño, solo tenemos un componente. El mismo engloba toda la implementacion
-
-## Component
-![alt text](docu/Component-001.png)
-Por ultimo, tenemos los componentes que conforman el container. La creacion de los objetos se delega a un componente de fabrica. Luego, el usuario puede usar tanto el Queue como Exchange middleware a gusto. Estos abstraen toda la comunicacion con RabbitMQ
