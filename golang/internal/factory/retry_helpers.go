@@ -22,6 +22,18 @@ func mapAMQPError(err error) error {
 	return m.ErrMessageMiddlewareMessage
 }
 
+func normalizeMiddlewareErr(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	if errors.Is(err, m.ErrMessageMiddlewareDisconnected) || errors.Is(err, m.ErrMessageMiddlewareMessage) {
+		return err
+	}
+
+	return mapAMQPError(err)
+}
+
 func closeIfReplaced(current *amqp.Connection, replacement *amqp.Connection) {
 	if current != nil && current != replacement {
 		current.Close()
@@ -73,4 +85,41 @@ func retryWithBackoff[T any](retries int, operation func() (T, error), recoverFu
 	}
 
 	return defaultValue, err
+}
+
+// tryDial intenta establecer una conexión con RabbitMQ utilizando la URI proporcionada.
+// Si la conexión falla, reintenta con un backoff exponencial hasta alcanzar el número máximo de reintentos.
+func tryDial(uri string, retries int) (*amqp.Connection, error) {
+	return retryWithBackoff(
+		retries,
+		func() (*amqp.Connection, error) {
+			return amqp.Dial(uri)
+		},
+		nil,
+	)
+}
+
+func tryCreateChannel(conn *amqp.Connection, uri string, retries int) (*amqp.Connection, *amqp.Channel, error) {
+	newConn := conn
+
+	ch, err := retryWithBackoff(
+		retries,
+		func() (*amqp.Channel, error) {
+			return newConn.Channel()
+		},
+		func() error {
+			var dialErr error
+			previousConn := newConn
+			newConn, dialErr = tryDial(uri, retries)
+			if dialErr == nil {
+				closeIfReplaced(previousConn, newConn)
+			}
+			return dialErr
+		},
+	)
+	if err != nil {
+		return nil, nil, normalizeMiddlewareErr(err)
+	}
+
+	return newConn, ch, nil
 }

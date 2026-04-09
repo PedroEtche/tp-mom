@@ -19,42 +19,37 @@ type QueueMiddleware struct {
 	stopSignal atomic.Bool
 }
 
-// tryDial intenta establecer una conexión con RabbitMQ utilizando la URI proporcionada.
-// Si la conexión falla, reintenta con un backoff exponencial hasta alcanzar el número máximo de reintentos.
-func tryDial(uri string, retries int) (*amqp.Connection, error) {
-	return retryWithBackoff(
-		retries,
-		func() (*amqp.Connection, error) {
-			return amqp.Dial(uri)
-		},
-		nil,
-	)
-}
+// -----------------------------------------------------------------------------
+// CONSTRUCTOR
+// -----------------------------------------------------------------------------
 
-func tryCreateChannel(conn *amqp.Connection, uri string, retries int) (*amqp.Connection, *amqp.Channel, error) {
-	newConn := conn
-
-	ch, err := retryWithBackoff(
-		retries,
-		func() (*amqp.Channel, error) {
-			return newConn.Channel()
-		},
-		func() error {
-			var dialErr error
-			previousConn := newConn
-			newConn, dialErr = tryDial(uri, retries)
-			if dialErr == nil {
-				closeIfReplaced(previousConn, newConn)
-			}
-			return dialErr
-		},
-	)
+func NewQueue(name string, connectionSettings m.ConnSettings) (*QueueMiddleware, error) {
+	uri := fmt.Sprintf("amqp://guest:guest@%s:%v/", connectionSettings.Hostname, connectionSettings.Port)
+	conn, err := tryDial(uri, defaultRetries)
 	if err != nil {
-		return nil, nil, mapAMQPError(err)
+		return nil, err
 	}
 
-	return newConn, ch, nil
+	// NOTE: Creo un nuevo channel para cada nuevo QueueMiddleware. Segun los docs de RabbitMQ (https://www.rabbitmq.com/docs/channels),
+	// internamente van a utilizar la misma conexion TCP para evitar overhead
+	conn, ch, err := tryCreateChannel(conn, uri, defaultRetries)
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+
+	q, ch, conn, err := tryDeclareQueue(ch, name, conn, uri, defaultRetries)
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+
+	return &QueueMiddleware{uri: uri, connection: conn, channel: ch, queue: q, name: name}, nil
 }
+
+// -----------------------------------------------------------------------------
+// RESOURCE RECOVERY
+// -----------------------------------------------------------------------------
 
 func tryDeclareQueue(ch *amqp.Channel, name string, conn *amqp.Connection, uri string, retries int) (amqp.Queue, *amqp.Channel, *amqp.Connection, error) {
 	c := conn
@@ -85,7 +80,7 @@ func tryDeclareQueue(ch *amqp.Channel, name string, conn *amqp.Connection, uri s
 		},
 	)
 	if err != nil {
-		return amqp.Queue{}, nil, nil, mapAMQPError(err)
+		return amqp.Queue{}, nil, nil, normalizeMiddlewareErr(err)
 	}
 
 	return q, ch, c, nil
@@ -112,59 +107,39 @@ func (qm *QueueMiddleware) recoverQueueResources(retries int) error {
 	return nil
 }
 
-func NewQueue(name string, connectionSettings m.ConnSettings) (*QueueMiddleware, error) {
-	uri := fmt.Sprintf("amqp://guest:guest@%s:%v/", connectionSettings.Hostname, connectionSettings.Port)
-	conn, err := tryDial(uri, defaultRetries)
-	if err != nil {
-		return nil, err
-	}
+// -----------------------------------------------------------------------------
+// CONSUME FLOW
+// -----------------------------------------------------------------------------
 
-	// NOTE: Creo un nuevo channel para cada nuevo QueueMiddleware. Segun los docs de RabbitMQ (https://www.rabbitmq.com/docs/channels),
-	// internamente van a utilizar la misma conexion TCP para evitar overhead
-	conn, ch, err := tryCreateChannel(conn, uri, defaultRetries)
-	if err != nil {
-		conn.Close()
-		return nil, err
-	}
+func (qm *QueueMiddleware) consumeFromQueue() (<-chan amqp.Delivery, error) {
+	qm.stateMutex.Lock()
+	defer qm.stateMutex.Unlock()
 
-	q, ch, conn, err := tryDeclareQueue(ch, name, conn, uri, defaultRetries)
-	if err != nil {
-		conn.Close()
-		return nil, err
-	}
-
-	return &QueueMiddleware{uri: uri, connection: conn, channel: ch, queue: q, name: name}, nil
+	// NOTE: Que el tag del consumer sea el mismo que el de la queue no deberia traer problema porque cada QueueMiddleware
+	// crea un nuevo channel (https://www.rabbitmq.com/docs/channels)
+	return qm.channel.Consume(
+		qm.queue.Name, // queue
+		qm.queue.Name, // consumer
+		false,         // auto-ack
+		false,         // exclusive
+		false,         // no-local
+		false,         // no-wait
+		nil,           // args
+	)
 }
-
-// -----------------------------------------------------------------------------
-// MIDDLEWARE INTERFACE IMPLEMENTATION
-// -----------------------------------------------------------------------------
 
 func (qm *QueueMiddleware) tryConsuming(retries int) (msgs <-chan amqp.Delivery, err error) {
 	msgCh, err := retryWithBackoff(
 		retries,
 		func() (<-chan amqp.Delivery, error) {
-			qm.stateMutex.Lock()
-			defer qm.stateMutex.Unlock()
-
-			// NOTE: Que el tag del consumer sea el mismo que el de la queue no deberia traer problema porque cada QueueMiddleware
-			// crea un nuevo channel (https://www.rabbitmq.com/docs/channels)
-			return qm.channel.Consume(
-				qm.queue.Name, // queue
-				qm.queue.Name, // consumer
-				false,         // auto-ack
-				false,         // exclusive
-				false,         // no-local
-				false,         // no-wait
-				nil,           // args
-			)
+			return qm.consumeFromQueue()
 		},
 		func() error {
 			return qm.recoverQueueResources(defaultRetries)
 		},
 	)
 	if err != nil {
-		return msgCh, mapAMQPError(err)
+		return msgCh, normalizeMiddlewareErr(err)
 	}
 
 	return msgCh, nil
@@ -191,16 +166,24 @@ func (qm *QueueMiddleware) StartConsuming(callbackFunc func(msg m.Message, ack f
 	}
 }
 
+// -----------------------------------------------------------------------------
+// STOP FLOW
+// -----------------------------------------------------------------------------
+
+func (qm *QueueMiddleware) cancelConsuming() error {
+	qm.stateMutex.Lock()
+	defer qm.stateMutex.Unlock()
+
+	// NOTE: En este caso qm.queue.Name hace alusion al nombre del consumer
+	return qm.channel.Cancel(qm.queue.Name, false)
+}
+
 func (qm *QueueMiddleware) tryStopConsuming(retries int) (err error) {
 	_, err = retryWithBackoff(
 		retries,
 		func() (struct{}, error) {
-			qm.stateMutex.Lock()
-			defer qm.stateMutex.Unlock()
-
 			placeHolder := struct{}{}
-			// NOTE: En este caso qm.queue.Name hace alusion al nombre del consumer
-			result := qm.channel.Cancel(qm.queue.Name, false)
+			result := qm.cancelConsuming()
 			return placeHolder, result
 		},
 		func() error {
@@ -219,25 +202,33 @@ func (qm *QueueMiddleware) StopConsuming() error {
 	return qm.tryStopConsuming(defaultRetries)
 }
 
+// -----------------------------------------------------------------------------
+// PUBLISH FLOW
+// -----------------------------------------------------------------------------
+
+func (qm *QueueMiddleware) publishToQueue(msg m.Message) error {
+	qm.stateMutex.Lock()
+	defer qm.stateMutex.Unlock()
+
+	return qm.channel.Publish(
+		"",            // exchange
+		qm.queue.Name, // routing key
+		false,         // mandatory
+		false,         // immediate
+		amqp.Publishing{
+			ContentType:  "text/plain",
+			Body:         []byte(msg.Body),
+			DeliveryMode: amqp.Persistent, // NOTE: Aseguro que el mensaje sea persistente para que no se pierda en caso de que el broker se caiga
+		},
+	)
+}
+
 func (qm *QueueMiddleware) tryPublish(msg m.Message, retries int) (err error) {
 	_, err = retryWithBackoff(
 		retries,
 		func() (struct{}, error) {
-			qm.stateMutex.Lock()
-			defer qm.stateMutex.Unlock()
-
 			placeHolder := struct{}{}
-			result := qm.channel.Publish(
-				"",            // exchange
-				qm.queue.Name, // routing key
-				false,         // mandatory
-				false,         // immediate
-				amqp.Publishing{
-					ContentType:  "text/plain",
-					Body:         []byte(msg.Body),
-					DeliveryMode: amqp.Persistent, // NOTE: Aseguro que el mensaje sea persistente para que no se pierda en caso de que el broker se caiga
-				},
-			)
+			result := qm.publishToQueue(msg)
 			return placeHolder, result
 		},
 		func() error {
@@ -245,7 +236,7 @@ func (qm *QueueMiddleware) tryPublish(msg m.Message, retries int) (err error) {
 		},
 	)
 	if err != nil {
-		return mapAMQPError(err)
+		return normalizeMiddlewareErr(err)
 	}
 
 	return nil
@@ -254,6 +245,10 @@ func (qm *QueueMiddleware) tryPublish(msg m.Message, retries int) (err error) {
 func (qm *QueueMiddleware) Send(msg m.Message) (err error) {
 	return qm.tryPublish(msg, defaultRetries)
 }
+
+// -----------------------------------------------------------------------------
+// CLOSE
+// -----------------------------------------------------------------------------
 
 func (qm *QueueMiddleware) Close() error {
 	qm.stopSignal.Store(true)
