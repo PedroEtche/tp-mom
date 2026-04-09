@@ -34,7 +34,7 @@ func NewExchange(name string, keys []string, connectionSettings m.ConnSettings) 
 	err = ch.ExchangeDeclare(
 		name,     // name
 		"direct", // type
-		false,    // durability
+		true,     // durability
 		false,    // auto-deleted
 		false,    // internal
 		false,    // no-wait
@@ -55,7 +55,7 @@ func NewExchange(name string, keys []string, connectionSettings m.ConnSettings) 
 func (em *ExchangeMiddleware) queueDeclareSetUp() (amqp.Queue, error) {
 	q, err := em.channel.QueueDeclare(
 		"",    // name
-		false, // durability
+		true,  // durability
 		true,  // delete when unused
 		false, // exclusive
 		false, // no-wait
@@ -152,8 +152,9 @@ func (em *ExchangeMiddleware) Send(msg m.Message) (err error) {
 			false,   // mandatory
 			false,   // immediate
 			amqp.Publishing{
-				ContentType: "text/plain",
-				Body:        []byte(msg.Body),
+				ContentType:  "text/plain",
+				Body:         []byte(msg.Body),
+				DeliveryMode: amqp.Persistent, // NOTE: Aseguro que el mensaje sea persistente para que no se pierda en caso de que el broker se caiga
 			})
 		if err != nil {
 			if errors.Is(err, amqp.ErrClosed) {
