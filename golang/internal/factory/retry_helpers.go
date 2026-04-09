@@ -9,6 +9,7 @@ import (
 )
 
 const defaultRetries = 3
+const defaultPublishConfirmTimeout = 2 * time.Second
 
 func exponentialBackoffSleep(attempt int) {
 	sleepDuration := time.Duration(2<<attempt) * time.Second // Exponential backoff: 2s, 4s, 8s
@@ -60,8 +61,6 @@ func retryWithBackoff[T any](retries int, operation func() (T, error), recoverFu
 	var defaultValue T
 	var err error
 
-	// En el ultimo intento fallido no tiene sentido recuperar ni dormir,
-	// porque no habra una nueva operacion que aproveche esa recuperacion.
 	for i := range retries + 1 {
 		result, opErr := operation()
 		if opErr == nil {
@@ -69,6 +68,8 @@ func retryWithBackoff[T any](retries int, operation func() (T, error), recoverFu
 		}
 
 		err = opErr
+		// En el ultimo intento fallido no tiene sentido recuperar ni dormir,
+		// porque no habra una nueva operacion que aproveche esa recuperacion.
 		if i == retries-1 {
 			break
 		}

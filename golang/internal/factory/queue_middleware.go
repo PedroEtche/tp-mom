@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	m "github.com/7574-sistemas-distribuidos/tp-mom/golang/internal/middleware"
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -13,6 +14,7 @@ type QueueMiddleware struct {
 	uri        string
 	connection *amqp.Connection
 	channel    *amqp.Channel
+	publishAck <-chan amqp.Confirmation
 	queue      amqp.Queue
 	name       string
 	stateMutex sync.Mutex
@@ -44,7 +46,21 @@ func NewQueue(name string, connectionSettings m.ConnSettings) (*QueueMiddleware,
 		return nil, err
 	}
 
-	return &QueueMiddleware{uri: uri, connection: conn, channel: ch, queue: q, name: name}, nil
+	publishAck, err := configurePublisherConfirms(ch)
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+
+	return &QueueMiddleware{uri: uri, connection: conn, channel: ch, publishAck: publishAck, queue: q, name: name}, nil
+}
+
+func configurePublisherConfirms(ch *amqp.Channel) (<-chan amqp.Confirmation, error) {
+	if err := ch.Confirm(false); err != nil {
+		return nil, normalizeMiddlewareErr(err)
+	}
+
+	return ch.NotifyPublish(make(chan amqp.Confirmation, 1)), nil
 }
 
 // -----------------------------------------------------------------------------
@@ -98,11 +114,17 @@ func (qm *QueueMiddleware) recoverQueueResources(retries int) error {
 		return err
 	}
 
+	publishAck, err := configurePublisherConfirms(ch)
+	if err != nil {
+		return err
+	}
+
 	closeResourcesIfReplaced(previousChannel, ch, previousConn, c)
 
 	qm.queue = q
 	qm.channel = ch
 	qm.connection = c
+	qm.publishAck = publishAck
 
 	return nil
 }
@@ -210,7 +232,7 @@ func (qm *QueueMiddleware) publishToQueue(msg m.Message) error {
 	qm.stateMutex.Lock()
 	defer qm.stateMutex.Unlock()
 
-	return qm.channel.Publish(
+	err := qm.channel.Publish(
 		"",            // exchange
 		qm.queue.Name, // routing key
 		false,         // mandatory
@@ -221,6 +243,24 @@ func (qm *QueueMiddleware) publishToQueue(msg m.Message) error {
 			DeliveryMode: amqp.Persistent, // NOTE: Aseguro que el mensaje sea persistente para que no se pierda en caso de que el broker se caiga
 		},
 	)
+	if err != nil {
+		return err
+	}
+
+	select {
+	case confirmation, ok := <-qm.publishAck:
+		if !ok {
+			return m.ErrMessageMiddlewareDisconnected
+		}
+
+		if !confirmation.Ack {
+			return m.ErrMessageMiddlewareMessage
+		}
+	case <-time.After(defaultPublishConfirmTimeout):
+		return m.ErrMessageMiddlewareDisconnected
+	}
+
+	return nil
 }
 
 func (qm *QueueMiddleware) tryPublish(msg m.Message, retries int) (err error) {

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	m "github.com/7574-sistemas-distribuidos/tp-mom/golang/internal/middleware"
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -15,6 +16,7 @@ type ExchangeMiddleware struct {
 	name       string
 	keys       []string
 	channel    *amqp.Channel
+	publishAck <-chan amqp.Confirmation
 	stateMutex sync.Mutex
 	stopSignal atomic.Bool
 }
@@ -42,7 +44,13 @@ func NewExchange(name string, keys []string, connectionSettings m.ConnSettings) 
 		return nil, err
 	}
 
-	return &ExchangeMiddleware{uri: uri, connection: conn, name: name, keys: keys, channel: ch}, nil
+	publishAck, err := configurePublisherConfirms(ch)
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+
+	return &ExchangeMiddleware{uri: uri, connection: conn, name: name, keys: keys, channel: ch, publishAck: publishAck}, nil
 }
 
 // -----------------------------------------------------------------------------
@@ -97,10 +105,16 @@ func (em *ExchangeMiddleware) recoverExchangeResources(retries int) error {
 		return err
 	}
 
+	publishAck, err := configurePublisherConfirms(ch)
+	if err != nil {
+		return err
+	}
+
 	closeResourcesIfReplaced(previousChannel, ch, previousConn, c)
 
 	em.channel = ch
 	em.connection = c
+	em.publishAck = publishAck
 
 	return nil
 }
@@ -318,7 +332,7 @@ func (em *ExchangeMiddleware) tryPublish(key string, msg m.Message, retries int)
 			defer em.stateMutex.Unlock()
 
 			placeHolder := struct{}{}
-			result := em.channel.Publish(
+			err := em.channel.Publish(
 				em.name, // exchange
 				key,     // routing key
 				false,   // mandatory
@@ -328,7 +342,24 @@ func (em *ExchangeMiddleware) tryPublish(key string, msg m.Message, retries int)
 					Body:         []byte(msg.Body),
 					DeliveryMode: amqp.Persistent, // NOTE: Aseguro que el mensaje sea persistente para que no se pierda en caso de que el broker se caiga
 				})
-			return placeHolder, result
+			if err != nil {
+				return placeHolder, err
+			}
+
+			select {
+			case confirmation, ok := <-em.publishAck:
+				if !ok {
+					return placeHolder, m.ErrMessageMiddlewareDisconnected
+				}
+
+				if !confirmation.Ack {
+					return placeHolder, m.ErrMessageMiddlewareMessage
+				}
+			case <-time.After(defaultPublishConfirmTimeout):
+				return placeHolder, m.ErrMessageMiddlewareDisconnected
+			}
+
+			return placeHolder, nil
 		},
 		func() error {
 			return em.recoverExchangeResources(defaultRetries)
